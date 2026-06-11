@@ -60,7 +60,7 @@
 
 <h2>1. Analyse du patron Saga (Activité 1)</h2>
 
-<div class="q">💡 Question 1 — Lequel de ces 3 fichiers représente la machine à états ? Son implémentation est-elle complète ?</div>
+<div class="q">Question 1 — Lequel de ces 3 fichiers représente la machine à états ? Son implémentation est-elle complète ?</div>
 <div class="a">
 Le fichier <code>src/controllers/order_saga_controller.py</code> représente la <b>machine à états</b>. C'est lui qui détient l'état courant (<code>self.current_saga_state</code>), exécute la boucle de transitions et décide quel Handler appeler pour chaque état. Les états eux-mêmes sont définis dans <code>src/order_saga_state.py</code> (l'énumération <code>OrderSagaState</code>), et chaque <i>transition</i> est réalisée par une classe Handler.
 
@@ -91,7 +91,7 @@ Le fichier <code>src/controllers/order_saga_controller.py</code> représente la 
 Cette boucle correspond <b>exactement</b> au diagramme de machine à états (<code>state_machine.puml</code>) : chaque <code>elif</code> est un état, chaque appel de Handler est une transition.
 </div>
 
-<div class="q">💡 Question 2 — Le handler CreateOrderHandler se connecte-t-il directement à une base de données ?</div>
+<div class="q">Question 2 — Le handler CreateOrderHandler se connecte-t-il directement à une base de données ?</div>
 <div class="a">
 <b>Non.</b> <code>CreateOrderHandler</code> ne touche jamais une base de données. Il effectue uniquement un appel HTTP REST vers le Store Manager <i>via</i> l'API Gateway (KrakenD). C'est le Store Manager qui possède la logique d'accès à MySQL/Redis. Extrait de <code>src/handlers/create_order_handler.py</code> :
 
@@ -108,7 +108,7 @@ Cette boucle correspond <b>exactement</b> au diagramme de machine à états (<co
 L'orchestrateur reste donc <b>découplé</b> des bases de données : il ne fait que coordonner des services. Aucune dépendance d'accès aux données (<code>mysql.connector</code>, <code>SQLAlchemy</code>, <code>redis</code>) n'apparaît dans le <code>requirements.txt</code> de l'orchestrateur — uniquement <code>Flask</code>, <code>requests</code>, et les paquets OpenTelemetry pour le tracing.
 </div>
 
-<div class="q">💡 Question 3 — Quelle requête de la collection Postman du Labo 05 correspond à l'endpoint appelé par CreateOrderHandler ?</div>
+<div class="q">Question 3 — Quelle requête de la collection Postman du Labo 05 correspond à l'endpoint appelé par CreateOrderHandler ?</div>
 <div class="a">
 <code>CreateOrderHandler</code> appelle <code>POST {{gateway}}/store-manager-api/orders</code>, que KrakenD route vers le backend <code>POST http://store_manager:5000/orders</code>. Dans la collection Postman du Store Manager (<code>docs/collections/store_manager.json</code>), cela correspond à la requête <b>« Orders / /orders » (méthode POST)</b> :
 
@@ -136,7 +136,7 @@ Controller - DEBUG - Transition à l'état terminal
 <div class="pagebreak"></div>
 <h2>2. Implémentation de la gestion de stock (Activité 2)</h2>
 
-<div class="q">💡 Question 4 — Quel endpoint avez-vous appelé pour modifier le stock ? Quelles informations de la commande avez-vous utilisées ?</div>
+<div class="q">Question 4 — Quel endpoint avez-vous appelé pour modifier le stock ? Quelles informations de la commande avez-vous utilisées ?</div>
 <div class="a">
 J'ai appelé <code>PUT {{gateway}}/store-manager-api/stocks</code> (routé vers <code>PUT http://store_manager:5000/stocks</code>). J'ai utilisé la <b>liste des articles de la commande</b> (<code>order_item_data</code> = <code>items</code>, c.-à-d. <code>product_id</code> + <code>quantity</code>) avec l'opération <code>"-"</code> pour retirer du stock. Pour la compensation (rollback), j'utilise l'<b>ID de la commande</b> afin de la supprimer. Extrait de <code>src/handlers/decrease_stock_handler.py</code> :
 
@@ -168,7 +168,7 @@ La transition <code>1 → 5 (DecreaseStockFailure)</code> du diagramme est respe
 
 <h2>3. Implémentation de la création de paiement (Activité 3)</h2>
 
-<div class="q">💡 Question 5 — Quel endpoint avez-vous appelé pour générer une transaction de paiement ? Quelles informations avez-vous utilisées ?</div>
+<div class="q">Question 5 — Quel endpoint avez-vous appelé pour générer une transaction de paiement ? Quelles informations avez-vous utilisées ?</div>
 <div class="a">
 Deux appels sont nécessaires. (1) Je récupère d'abord la commande via <code>GET {{gateway}}/store-manager-api/orders/{order_id}</code> pour obtenir son <code>total_amount</code>. (2) Je crée ensuite la transaction via <code>POST {{gateway}}/payments-api/payments</code> (routé vers <code>http://payments_api:5009/payments</code>) en envoyant <code>user_id</code>, <code>order_id</code> et <code>total_amount</code>. Extrait de <code>src/handlers/create_payment_handler.py</code> :
 
@@ -249,7 +249,7 @@ RequestsInstrumentor().instrument()        <span class="c"># instrumentation aut
 <div class="pagebreak"></div>
 <h2>6. Test de la transaction Saga complète (Activité 6)</h2>
 
-<div class="q">💡 Question 6 — Quelle est la différence entre appeler l'orchestrateur Saga et appeler directement les endpoints des services individuels ? Avantages / inconvénients ?</div>
+<div class="q">Question 6 — Quelle est la différence entre appeler l'orchestrateur Saga et appeler directement les endpoints des services individuels ? Avantages / inconvénients ?</div>
 <div class="a">
 Appeler directement les endpoints (POST /orders, PUT /stocks, POST /payments) oblige le <b>client</b> à connaître la séquence, à gérer les erreurs et à compenser manuellement si une étape échoue ; un échec partiel laisse le système <b>incohérent</b> (commande sans stock décrémenté ni paiement). Appeler l'orchestrateur (<code>POST /saga/order</code>) centralise toute cette logique : le client fait <b>un seul appel</b>, et l'orchestrateur garantit l'atomicité logique (tout réussit, ou tout est compensé).
 
@@ -273,7 +273,7 @@ Concrètement, la même commande passée par l'orchestrateur produit, en un appe
 <tr><td>store-manager</td><td>Commande créée (MySQL + Redis)</td><td class="ok">order_id=10, total_amount=59.50</td></tr>
 <tr><td>store-manager</td><td>Stock décrémenté</td><td class="ok">produit 2 : 500 → 495 → … cohérent</td></tr>
 <tr><td>payments-api</td><td>Transaction de paiement</td><td class="ok">order_id correspondant, total_amount correct</td></tr>
-<tr><td>Jaeger</td><td>Trace de bout en bout</td><td class="ok">4 services, 29 spans (Figure 1)</td></tr>
+<tr><td>Jaeger</td><td>Trace unique reliant les services</td><td class="ok">4 services, 29 spans (Figure 1)</td></tr>
 </table>
 </div>
 
@@ -300,11 +300,11 @@ Controller - DEBUG - Transition à l'état terminal
 
 <h3>Trace de la compensation dans Jaeger</h3>
 <img src="screenshots/jaeger_trace_compensation.png" alt="Trace Jaeger compensation">
-<p class="cap">Figure 3 — Trace d'une saga en échec (<b>41 spans, 3 erreurs</b>). Les marqueurs rouges ⊘ signalent l'échec de <code>POST /payments</code> (timeout 5 s, service arrêté). On voit ensuite la transition de compensation <code>PUT /store-manager-api/stocks</code> (remise en stock) puis la suppression de la commande, le tout tracé de bout en bout.</p>
+<p class="cap">Figure 3 — Trace d'une saga en échec (<b>41 spans, 3 erreurs</b>). Les marqueurs rouges ⊘ signalent l'échec de <code>POST /payments</code> (timeout 5 s, service arrêté). On voit ensuite la transition de compensation <code>PUT /store-manager-api/stocks</code> (remise en stock) puis la suppression de la commande, l'ensemble restant rattaché à la même trace.</p>
 
 <h2>8. Conclusion</h2>
 <div class="a">
-Le patron <b>Saga orchestré</b> est entièrement implémenté : les 4 transitions (CreateOrder, DecreaseStock, CreatePayment, DeleteOrder) et leurs <b>compensations</b> (suppression de commande, restauration de stock) suivent fidèlement la machine à états du document arc42, vérifiées sur le flux nominal <i>et</i> le flux d'échec. Le <b>tracing distribué</b> via OpenTelemetry/Jaeger relie l'orchestrateur, le store-manager et le payments-api (+ la Gateway) dans une seule trace, permettant de visualiser et déboguer chaque transaction de bout en bout. L'orchestrateur reste découplé des bases de données : il ne fait que coordonner des appels HTTP REST, garantissant la cohérence des données sans transactions ACID distribuées.
+Les 4 transitions de la saga (CreateOrder, DecreaseStock, CreatePayment, DeleteOrder) et leurs compensations (suppression de commande, restauration de stock) sont implémentées et testées, autant sur le flux nominal que sur le flux d'échec. Dans les deux cas, le comportement observé correspond à la machine à états du document arc42. Côté observabilité, OpenTelemetry et Jaeger regroupent l'orchestrateur, le store-manager et le payments-api (plus la Gateway) dans une seule trace, ce qui permet de suivre une commande à travers les trois services et de repérer rapidement l'étape qui échoue. Enfin, l'orchestrateur n'accède à aucune base de données : il coordonne seulement des appels HTTP REST, et c'est cette coordination qui maintient la cohérence sans recourir aux transactions ACID distribuées.
 </div>
 
 </body>
