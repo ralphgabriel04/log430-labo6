@@ -105,7 +105,7 @@ Cette boucle correspond <b>exactement</b> au diagramme de machine à états (<co
         data = response.json()
         self.order_id = data[<span class="s">'order_id'</span>] <span class="k">if</span> data <span class="k">else</span> <span class="s">0</span>
         <span class="k">return</span> OrderSagaState.ORDER_CREATED</pre>
-L'orchestrateur reste donc <b>découplé</b> des bases de données : il ne fait que coordonner des services. Aucune dépendance comme <code>mysql.connector</code> ou <code>redis</code> n'est importée dans l'orchestrateur (voir <code>requirements.txt</code> qui ne contient que <code>Flask</code>, <code>requests</code>, etc.).
+L'orchestrateur reste donc <b>découplé</b> des bases de données : il ne fait que coordonner des services. Aucune dépendance d'accès aux données (<code>mysql.connector</code>, <code>SQLAlchemy</code>, <code>redis</code>) n'apparaît dans le <code>requirements.txt</code> de l'orchestrateur — uniquement <code>Flask</code>, <code>requests</code>, et les paquets OpenTelemetry pour le tracing.
 </div>
 
 <div class="q">💡 Question 3 — Quelle requête de la collection Postman du Labo 05 correspond à l'endpoint appelé par CreateOrderHandler ?</div>
