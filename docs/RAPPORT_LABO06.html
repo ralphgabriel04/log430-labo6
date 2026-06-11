@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<title>Rapport Labo 06 — Orchestrateur Saga et Distributed Tracing</title>
+<style>
+  @page { size: A4; margin: 18mm 16mm; }
+  * { box-sizing: border-box; }
+  body { font-family: "Segoe UI", Arial, sans-serif; color: #1a1a1a; line-height: 1.5; font-size: 11.5px; }
+  h1 { font-size: 22px; color: #0b3d91; border-bottom: 3px solid #0b3d91; padding-bottom: 6px; margin-bottom: 2px; }
+  h2 { font-size: 16px; color: #0b3d91; margin-top: 26px; border-bottom: 1px solid #cdd7e5; padding-bottom: 3px; }
+  h3 { font-size: 13.5px; color: #133a6b; margin-top: 18px; }
+  .sub { color: #555; font-size: 11px; margin-top: 0; }
+  .q { background: #eef4ff; border-left: 4px solid #0b3d91; padding: 8px 12px; margin: 12px 0 6px; font-weight: 600; }
+  .a { margin: 4px 0 10px; }
+  code { background: #f1f3f6; padding: 1px 4px; border-radius: 3px; font-family: "Consolas", monospace; font-size: 10.5px; color: #b00057; }
+  pre { background: #1e1e2e; color: #e6e6e6; padding: 10px 12px; border-radius: 6px; overflow-x: auto; font-family: "Consolas", monospace; font-size: 10px; line-height: 1.4; white-space: pre-wrap; word-break: break-word; }
+  pre .c { color: #6a9955; }      /* comment */
+  pre .k { color: #569cd6; }      /* keyword */
+  pre .s { color: #ce9178; }      /* string */
+  pre .f { color: #dcdcaa; }      /* func */
+  table { border-collapse: collapse; width: 100%; margin: 10px 0; font-size: 10.5px; }
+  th, td { border: 1px solid #c4ccd8; padding: 5px 8px; text-align: left; vertical-align: top; }
+  th { background: #0b3d91; color: #fff; }
+  tr:nth-child(even) td { background: #f5f8fc; }
+  img { max-width: 100%; border: 1px solid #cdd7e5; border-radius: 5px; margin: 8px 0; }
+  .cap { font-size: 10px; color: #555; font-style: italic; margin: -4px 0 14px; }
+  .ok { color: #1a7f37; font-weight: 600; }
+  .bad { color: #b00020; font-weight: 600; }
+  .note { background: #fff8e1; border-left: 4px solid #f0ad4e; padding: 8px 12px; margin: 10px 0; font-size: 10.5px; }
+  .pagebreak { page-break-before: always; }
+  ul { margin: 6px 0; padding-left: 20px; }
+  .meta td { font-size: 11px; }
+  .meta td:first-child { font-weight: 600; width: 150px; background: #eef2f8; }
+</style>
+</head>
+<body>
+
+<h1>Laboratoire 06 — Orchestrateur Saga et Distributed Tracing</h1>
+<p class="sub">LOG430 — Architecture logicielle · ÉTS · Automne 2025 · Chargé de laboratoire : Gabriel C. Ullmann</p>
+
+<table class="meta">
+  <tr><td>Dépôt principal</td><td>log430-labo6-saga-orchestrator</td></tr>
+  <tr><td>Services impliqués</td><td>saga-orchestrator (5123), store-manager (5000), payments-api (5009), api-gateway KrakenD (8080), Jaeger (16686)</td></tr>
+  <tr><td>Patron implémenté</td><td>Saga avec orchestration centralisée + machine à états + compensation (rollback)</td></tr>
+  <tr><td>Observabilité</td><td>OpenTelemetry → Jaeger (tracing distribué sur les 3 microservices + la Gateway)</td></tr>
+</table>
+
+<h2>1. Analyse du patron Saga (Activité 1)</h2>
+
+<div class="q">💡 Question 1 — Lequel de ces 3 fichiers représente la machine à états ? Son implémentation est-elle complète ?</div>
+<div class="a">
+Le fichier <code>src/controllers/order_saga_controller.py</code> représente la <b>machine à états</b>. C'est lui qui détient l'état courant (<code>self.current_saga_state</code>), exécute la boucle de transitions et décide quel Handler appeler pour chaque état. Les états eux-mêmes sont définis dans <code>src/order_saga_state.py</code> (l'énumération <code>OrderSagaState</code>), et chaque <i>transition</i> est réalisée par une classe Handler.
+
+<p>Dans le gabarit fourni, l'implémentation était <b>incomplète</b> : seul l'état initial (<code>START → CreateOrder</code>) était fonctionnel. Les transitions <code>DecreaseStock</code>, <code>CreatePayment</code> et <code>DeleteOrder</code> n'étaient pas branchées, et l'état <code>STOCK_INCREASED</code> ne faisait qu'un commentaire <code>TODO</code> au lieu d'appeler <code>DeleteOrderHandler</code>. Extrait du gabarit original :</p>
+
+<pre><span class="k">elif</span> self.current_saga_state == OrderSagaState.STOCK_INCREASED:
+    self.logger.debug(<span class="s">"TODO: implémentez et utilisez la classe DeleteOrderHandler ..."</span>)
+    self.current_saga_state = OrderSagaState.ORDER_DELETED</pre>
+
+<p>La boucle d'états (machine à états) telle qu'elle existe après implémentation complète :</p>
+<pre><span class="k">while</span> self.current_saga_state <span class="k">is not</span> OrderSagaState.END:
+    <span class="k">if</span>   self.current_saga_state == OrderSagaState.START:
+        self.current_saga_state = self.create_order_handler.run()
+    <span class="k">elif</span> self.current_saga_state == OrderSagaState.ORDER_CREATED:
+        self.decrease_stock_handler = DecreaseStockHandler(self.create_order_handler.order_id, order_data[<span class="s">'items'</span>])
+        self.current_saga_state = self.decrease_stock_handler.run()
+        <span class="k">if</span> self.current_saga_state == OrderSagaState.ORDER_DELETED:
+            self.is_error_occurred = <span class="k">True</span>
+    <span class="k">elif</span> self.current_saga_state == OrderSagaState.STOCK_DECREASED:
+        self.create_payment_handler = CreatePaymentHandler(self.create_order_handler.order_id, order_data)
+        self.current_saga_state = self.create_payment_handler.run()
+    <span class="k">elif</span> self.current_saga_state == OrderSagaState.STOCK_INCREASED:
+        self.is_error_occurred = <span class="k">True</span>
+        self.delete_order_handler = DeleteOrderHandler(self.create_order_handler.order_id)
+        self.current_saga_state = self.delete_order_handler.run()
+    <span class="k">elif</span> self.current_saga_state <span class="k">is</span> OrderSagaState.PAYMENT_CREATED <span class="k">or</span> self.current_saga_state <span class="k">is</span> OrderSagaState.ORDER_DELETED:
+        self.current_saga_state = OrderSagaState.END</pre>
+Cette boucle correspond <b>exactement</b> au diagramme de machine à états (<code>state_machine.puml</code>) : chaque <code>elif</code> est un état, chaque appel de Handler est une transition.
+</div>
+
+<div class="q">💡 Question 2 — Le handler CreateOrderHandler se connecte-t-il directement à une base de données ?</div>
+<div class="a">
+<b>Non.</b> <code>CreateOrderHandler</code> ne touche jamais une base de données. Il effectue uniquement un appel HTTP REST vers le Store Manager <i>via</i> l'API Gateway (KrakenD). C'est le Store Manager qui possède la logique d'accès à MySQL/Redis. Extrait de <code>src/handlers/create_order_handler.py</code> :
+
+<pre><span class="k">def</span> <span class="f">run</span>(self):
+    <span class="s">"""Call StoreManager to create order"""</span>
+    response = requests.post(<span class="s">f'{config.API_GATEWAY_URL}/store-manager-api/orders'</span>,
+        json=self.order_data,
+        headers={<span class="s">'Content-Type'</span>: <span class="s">'application/json'</span>}
+    )
+    <span class="k">if</span> response.ok:
+        data = response.json()
+        self.order_id = data[<span class="s">'order_id'</span>] <span class="k">if</span> data <span class="k">else</span> <span class="s">0</span>
+        <span class="k">return</span> OrderSagaState.ORDER_CREATED</pre>
+L'orchestrateur reste donc <b>découplé</b> des bases de données : il ne fait que coordonner des services. Aucune dépendance comme <code>mysql.connector</code> ou <code>redis</code> n'est importée dans l'orchestrateur (voir <code>requirements.txt</code> qui ne contient que <code>Flask</code>, <code>requests</code>, etc.).
+</div>
+
+<div class="q">💡 Question 3 — Quelle requête de la collection Postman du Labo 05 correspond à l'endpoint appelé par CreateOrderHandler ?</div>
+<div class="a">
+<code>CreateOrderHandler</code> appelle <code>POST {{gateway}}/store-manager-api/orders</code>, que KrakenD route vers le backend <code>POST http://store_manager:5000/orders</code>. Dans la collection Postman du Store Manager (<code>docs/collections/store_manager.json</code>), cela correspond à la requête <b>« Orders / /orders » (méthode POST)</b> :
+
+<table>
+<tr><th>Requête Postman (Labo 05)</th><th>Méthode</th><th>URL</th><th>Corps</th></tr>
+<tr><td>Orders / /orders</td><td>POST</td><td><code>{{baseURL}}/orders</code></td><td><code>{ "user_id": 1, "items": [...] }</code></td></tr>
+</table>
+
+Le routage KrakenD (extrait de <code>krakend.json</code>) confirme la correspondance Gateway → backend :
+<pre>{
+  <span class="s">"endpoint"</span>: <span class="s">"/store-manager-api/orders"</span>, <span class="s">"method"</span>: <span class="s">"POST"</span>,
+  <span class="s">"backend"</span>: [{ <span class="s">"url_pattern"</span>: <span class="s">"/orders"</span>, <span class="s">"host"</span>: [<span class="s">"http://store_manager:5000"</span>] }]
+}</pre>
+</div>
+
+<h3>Vérification : logs de la saga (flux nominal)</h3>
+<p>En appelant <code>POST localhost:5123/saga/order</code>, on obtient exactement la séquence d'états attendue par le document arc42 :</p>
+<pre>Controller - DEBUG - État initial
+Handler    - DEBUG - Transition d'état: CreateOrder    -> ORDER_CREATED
+Handler    - DEBUG - Transition d'état: DecreaseStock  -> STOCK_DECREASED
+Handler    - DEBUG - Transition d'état: CreatePayment  -> PAYMENT_CREATED
+Controller - DEBUG - Transition à l'état terminal
+"POST /saga/order HTTP/1.1" 200</pre>
+
+<div class="pagebreak"></div>
+<h2>2. Implémentation de la gestion de stock (Activité 2)</h2>
+
+<div class="q">💡 Question 4 — Quel endpoint avez-vous appelé pour modifier le stock ? Quelles informations de la commande avez-vous utilisées ?</div>
+<div class="a">
+J'ai appelé <code>PUT {{gateway}}/store-manager-api/stocks</code> (routé vers <code>PUT http://store_manager:5000/stocks</code>). J'ai utilisé la <b>liste des articles de la commande</b> (<code>order_item_data</code> = <code>items</code>, c.-à-d. <code>product_id</code> + <code>quantity</code>) avec l'opération <code>"-"</code> pour retirer du stock. Pour la compensation (rollback), j'utilise l'<b>ID de la commande</b> afin de la supprimer. Extrait de <code>src/handlers/decrease_stock_handler.py</code> :
+
+<pre><span class="k">def</span> <span class="f">run</span>(self):
+    response = requests.put(<span class="s">f'{config.API_GATEWAY_URL}/store-manager-api/stocks'</span>,
+        json={
+            <span class="s">"items"</span>: self.order_item_data,
+            <span class="s">"operation"</span>: <span class="s">"-"</span>
+        },
+        headers={<span class="s">'Content-Type'</span>: <span class="s">'application/json'</span>})
+    <span class="k">if</span> response.ok:
+        <span class="k">return</span> OrderSagaState.STOCK_DECREASED
+    <span class="k">else</span>:
+        <span class="k">return</span> self.rollback()
+
+<span class="k">def</span> <span class="f">rollback</span>(self):
+    <span class="c"># Compensation : la commande a déjà été créée → on la supprime via son ID</span>
+    requests.delete(<span class="s">f'{config.API_GATEWAY_URL}/store-manager-api/orders/{self.order_id}'</span>,
+        headers={<span class="s">'Content-Type'</span>: <span class="s">'application/json'</span>})
+    <span class="k">return</span> OrderSagaState.ORDER_DELETED</pre>
+
+<b>Vérification</b> (stock du produit 2, avant/après une commande de quantité 5) :
+<table>
+<tr><th>Produit</th><th>Stock avant</th><th>Stock après <code>DecreaseStock</code></th></tr>
+<tr><td>2 (Keyboard DEF)</td><td>500</td><td class="ok">495</td></tr>
+</table>
+La transition <code>1 → 5 (DecreaseStockFailure)</code> du diagramme est respectée : si le retrait de stock échoue, la commande est supprimée et la saga passe à <code>ORDER_DELETED</code>.
+</div>
+
+<h2>3. Implémentation de la création de paiement (Activité 3)</h2>
+
+<div class="q">💡 Question 5 — Quel endpoint avez-vous appelé pour générer une transaction de paiement ? Quelles informations avez-vous utilisées ?</div>
+<div class="a">
+Deux appels sont nécessaires. (1) Je récupère d'abord la commande via <code>GET {{gateway}}/store-manager-api/orders/{order_id}</code> pour obtenir son <code>total_amount</code>. (2) Je crée ensuite la transaction via <code>POST {{gateway}}/payments-api/payments</code> (routé vers <code>http://payments_api:5009/payments</code>) en envoyant <code>user_id</code>, <code>order_id</code> et <code>total_amount</code>. Extrait de <code>src/handlers/create_payment_handler.py</code> :
+
+<pre><span class="k">def</span> <span class="f">run</span>(self):
+    <span class="c"># 1) Récupérer le total_amount de la commande</span>
+    order_response = requests.get(<span class="s">f'{config.API_GATEWAY_URL}/store-manager-api/orders/{self.order_id}'</span>, ...)
+    order = order_response.json() <span class="k">or</span> {}
+    self.total_amount = order.get(<span class="s">'total_amount'</span>, <span class="s">0</span>)
+
+    <span class="c"># 2) Créer la transaction de paiement</span>
+    payment_response = requests.post(<span class="s">f'{config.API_GATEWAY_URL}/payments-api/payments'</span>,
+        json={
+            <span class="s">"user_id"</span>:      self.order_data.get(<span class="s">'user_id'</span>),
+            <span class="s">"order_id"</span>:     self.order_id,
+            <span class="s">"total_amount"</span>: self.total_amount
+        }, ...)
+    <span class="k">if</span> payment_response.ok:
+        <span class="k">return</span> OrderSagaState.PAYMENT_CREATED
+    <span class="k">else</span>:
+        <span class="k">return</span> self.rollback()
+
+<span class="k">def</span> <span class="f">rollback</span>(self):
+    <span class="c"># Compensation : on remet en stock (opération "+") les articles retirés</span>
+    requests.put(<span class="s">f'{config.API_GATEWAY_URL}/store-manager-api/stocks'</span>,
+        json={<span class="s">"items"</span>: self.order_data.get(<span class="s">'items'</span>, []), <span class="s">"operation"</span>: <span class="s">"+"</span>}, ...)
+    <span class="k">return</span> OrderSagaState.STOCK_INCREASED</pre>
+
+<b>Vérification</b> : pour une commande (produit 3 ×2, produit 2 ×4) le Store Manager calcule <code>total_amount = 249.50</code>, et la transaction de paiement créée dans <code>payments-api</code> porte bien <code>order_id=1, total_amount=249.50</code>. La transition <code>2 → 4 (CreatePaymentFailure)</code> est respectée : en cas d'échec, le stock est restauré et la saga passe à <code>STOCK_INCREASED</code>.
+</div>
+
+<h2>4. Implémentation de la suppression de la commande (Activité 4)</h2>
+<div class="a">
+<code>DeleteOrderHandler</code> est le seul handler déclenché <b>uniquement en cas d'erreur</b> ; il n'effectue que la suppression de la commande et n'a pas de <code>rollback</code> (conforme au diagramme). Il est appelé depuis le contrôleur à l'état <code>STOCK_INCREASED</code> (transition <code>4 → 5 : DeleteOrder</code>). Extrait de <code>src/handlers/delete_order_handler.py</code> :
+
+<pre><span class="k">def</span> <span class="f">run</span>(self):
+    <span class="c"># Supprime la commande via son ID (transition 4 -> 5 du diagramme)</span>
+    requests.delete(<span class="s">f'{config.API_GATEWAY_URL}/store-manager-api/orders/{self.order_id}'</span>,
+        headers={<span class="s">'Content-Type'</span>: <span class="s">'application/json'</span>})
+    <span class="k">return</span> OrderSagaState.ORDER_DELETED</pre>
+
+Et son branchement dans <code>order_saga_controller.py</code> (l'appel manquant du gabarit) :
+<pre><span class="k">elif</span> self.current_saga_state == OrderSagaState.STOCK_INCREASED:
+    self.is_error_occurred = <span class="k">True</span>
+    self.delete_order_handler = DeleteOrderHandler(self.create_order_handler.order_id)
+    self.current_saga_state = self.delete_order_handler.run()</pre>
+<div class="note"><b>Note (compensation des compensations)</b> : conformément à l'énoncé, il n'y a pas de « rollback sur les rollbacks ». Chaque <code>rollback()</code> est encapsulé dans un <code>try/except</code> qui journalise l'erreur et poursuit vers l'état suivant jusqu'à l'état terminal.</div>
+</div>
+
+<div class="pagebreak"></div>
+<h2>5. Intégration de Jaeger — Distributed Tracing (Activité 5)</h2>
+<div class="a">
+J'ai ajouté le service <code>jaeger</code> au <code>docker-compose.yml</code> de l'orchestrateur, ajouté les 5 dépendances OpenTelemetry aux <code>requirements.txt</code> des 3 services, et instrumenté chacun d'eux (orchestrateur, store-manager, payments-api). KrakenD est configuré pour exporter ses traces vers Jaeger et propager le contexte (<code>input_headers: ["*"]</code> + bloc <code>telemetry/opentelemetry</code>). Configuration OTel commune (exemple, orchestrateur) :
+
+<pre>resource = Resource.create({<span class="s">"service.name"</span>: <span class="s">"saga-orchestrator"</span>, <span class="s">"service.version"</span>: <span class="s">"1.0.0"</span>})
+trace.set_tracer_provider(TracerProvider(resource=resource))
+tracer = trace.get_tracer(__name__)
+otlp_exporter = OTLPSpanExporter(endpoint=<span class="s">"http://jaeger:4317"</span>, insecure=<span class="k">True</span>)
+trace.get_tracer_provider().add_span_processor(BatchSpanProcessor(otlp_exporter))
+FlaskInstrumentor().instrument_app(app)   <span class="c"># instrumentation auto de Flask</span>
+RequestsInstrumentor().instrument()        <span class="c"># instrumentation auto des appels sortants</span>
+
+<span class="nd">@app.post</span>(<span class="s">'/saga/order'</span>)
+<span class="k">def</span> <span class="f">saga_order</span>():
+    <span class="k">with</span> tracer.start_as_current_span(<span class="s">"saga-order"</span>):   <span class="c"># span explicite</span>
+        ...</pre>
+
+<div class="note"><b>Point technique résolu</b> : KrakenD 2.7 n'acceptait pas le contexte de trace entrant car l'OpenTelemetry SDK récent émet le <i>traceparent</i> avec le flag W3C niveau 2 (« random », valeur <code>03</code>), que la Gateway ignore. La trace de l'orchestrateur restait donc isolée. La correction consiste à fixer les paquets OTel à une version émettant le flag <code>01</code> et à activer <code>OTEL_PROPAGATORS=tracecontext,baggage</code> sur KrakenD. Après cela, <b>une seule trace</b> relie les 4 services.</div>
+
+<h3>Trace complète d'une saga réussie (Jaeger)</h3>
+<img src="screenshots/jaeger_trace_succes.png" alt="Trace Jaeger succès">
+<p class="cap">Figure 1 — Trace distribuée d'une saga nominale : <b>4 services, 9 niveaux de profondeur, 29 spans</b>. On voit le flux complet
+<code>saga-orchestrator</code> → <code>krakend-gateway</code> → <code>store-manager</code> (POST /orders, PUT /stocks, GET /orders) puis → <code>payments-api</code> (POST /payments), le tout dans une seule trace liée.</p>
+
+<h3>Vue de recherche Jaeger (les 3 services + Gateway)</h3>
+<img src="screenshots/jaeger_recherche.png" alt="Recherche Jaeger">
+<p class="cap">Figure 2 — La liste des traces montre, pour chaque saga, la répartition des spans par service (<code>krakend-gateway</code>, <code>payments-api</code>, <code>saga-orchestrator</code>, <code>store-manager</code>). La trace en échec apparaît avec « 3 Errors ».</p>
+
+<div class="pagebreak"></div>
+<h2>6. Test de la transaction Saga complète (Activité 6)</h2>
+
+<div class="q">💡 Question 6 — Quelle est la différence entre appeler l'orchestrateur Saga et appeler directement les endpoints des services individuels ? Avantages / inconvénients ?</div>
+<div class="a">
+Appeler directement les endpoints (POST /orders, PUT /stocks, POST /payments) oblige le <b>client</b> à connaître la séquence, à gérer les erreurs et à compenser manuellement si une étape échoue ; un échec partiel laisse le système <b>incohérent</b> (commande sans stock décrémenté ni paiement). Appeler l'orchestrateur (<code>POST /saga/order</code>) centralise toute cette logique : le client fait <b>un seul appel</b>, et l'orchestrateur garantit l'atomicité logique (tout réussit, ou tout est compensé).
+
+<table>
+<tr><th>Approche</th><th>Avantages</th><th>Inconvénients</th></tr>
+<tr>
+  <td><b>Orchestrateur Saga</b><br><code>POST /saga/order</code></td>
+  <td>• Cohérence garantie (compensation automatique)<br>• Logique centralisée et réutilisable<br>• Client simple (1 appel)<br>• Observabilité d'un flux de bout en bout</td>
+  <td>• Point de défaillance unique (l'orchestrateur)<br>• Couplage temporel (appels synchrones)<br>• Latence cumulée des étapes</td>
+</tr>
+<tr>
+  <td><b>Appels directs</b><br>aux 3 services</td>
+  <td>• Moins de composants<br>• Latence d'un appel isolé plus faible</td>
+  <td>• Risque d'état incohérent en cas d'échec partiel<br>• Logique de coordination dupliquée chez chaque client<br>• Compensation manuelle et fragile</td>
+</tr>
+</table>
+
+Concrètement, la même commande passée par l'orchestrateur produit, en un appel, la création de la commande, la décrémentation du stock et la transaction de paiement — vérifiées dans chaque service :
+<table>
+<tr><th>Service</th><th>Vérification</th><th>Résultat</th></tr>
+<tr><td>store-manager</td><td>Commande créée (MySQL + Redis)</td><td class="ok">order_id=10, total_amount=59.50</td></tr>
+<tr><td>store-manager</td><td>Stock décrémenté</td><td class="ok">produit 2 : 500 → 495 → … cohérent</td></tr>
+<tr><td>payments-api</td><td>Transaction de paiement</td><td class="ok">order_id correspondant, total_amount correct</td></tr>
+<tr><td>Jaeger</td><td>Trace de bout en bout</td><td class="ok">4 services, 29 spans (Figure 1)</td></tr>
+</table>
+</div>
+
+<h2>7. Gestion des échecs et compensation (Activité 7)</h2>
+<div class="a">
+En <b>arrêtant le service <code>payments-api</code></b> puis en appelant la saga, l'étape <code>CreatePayment</code> échoue (HTTP 500 renvoyé par la Gateway). La saga déclenche alors la compensation : restauration du stock (<code>STOCK_INCREASED</code>) puis suppression de la commande (<code>DeleteOrder → ORDER_DELETED</code>), exactement comme dans le diagramme. Logs observés :
+
+<pre>Controller - DEBUG - État initial
+Handler    - DEBUG - Transition d'état: CreateOrder            -> ORDER_CREATED
+Handler    - DEBUG - Transition d'état: DecreaseStock          -> STOCK_DECREASED
+Handler    - ERROR - CreatePayment a échoué : 500
+Handler    - DEBUG - Transition d'état: CreatePaymentFailure   -> STOCK_INCREASED
+Handler    - DEBUG - Transition d'état: DeleteOrder            -> ORDER_DELETED
+Controller - DEBUG - Transition à l'état terminal
+"POST /saga/order HTTP/1.1" 500</pre>
+
+<b>Effets vérifiés</b> (la commande est annulée, le stock revient à son état initial) :
+<table>
+<tr><th>Élément</th><th>Avant compensation</th><th>Après compensation</th></tr>
+<tr><td>Commande (order_id=11)</td><td>créée</td><td class="ok">supprimée (MySQL + API renvoie <code>{}</code>)</td></tr>
+<tr><td>Stock produit 2</td><td>495 (décrémenté)</td><td class="ok">495 (restauré, net nul)</td></tr>
+<tr><td>Réponse HTTP</td><td>—</td><td class="bad">500 + message d'erreur</td></tr>
+</table>
+
+<h3>Trace de la compensation dans Jaeger</h3>
+<img src="screenshots/jaeger_trace_compensation.png" alt="Trace Jaeger compensation">
+<p class="cap">Figure 3 — Trace d'une saga en échec (<b>41 spans, 3 erreurs</b>). Les marqueurs rouges ⊘ signalent l'échec de <code>POST /payments</code> (timeout 5 s, service arrêté). On voit ensuite la transition de compensation <code>PUT /store-manager-api/stocks</code> (remise en stock) puis la suppression de la commande, le tout tracé de bout en bout.</p>
+
+<h2>8. Conclusion</h2>
+<div class="a">
+Le patron <b>Saga orchestré</b> est entièrement implémenté : les 4 transitions (CreateOrder, DecreaseStock, CreatePayment, DeleteOrder) et leurs <b>compensations</b> (suppression de commande, restauration de stock) suivent fidèlement la machine à états du document arc42, vérifiées sur le flux nominal <i>et</i> le flux d'échec. Le <b>tracing distribué</b> via OpenTelemetry/Jaeger relie l'orchestrateur, le store-manager et le payments-api (+ la Gateway) dans une seule trace, permettant de visualiser et déboguer chaque transaction de bout en bout. L'orchestrateur reste découplé des bases de données : il ne fait que coordonner des appels HTTP REST, garantissant la cohérence des données sans transactions ACID distribuées.
+</div>
+
+</body>
+</html>

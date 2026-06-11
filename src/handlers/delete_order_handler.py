@@ -3,6 +3,7 @@ Handler: delete order
 SPDX - License - Identifier: LGPL - 3.0 - or -later
 Auteurs : Gabriel C. Ullmann, Fabio Petrillo, 2025
 """
+import config
 import requests
 from handlers.handler import Handler
 from order_saga_state import OrderSagaState
@@ -16,11 +17,20 @@ class DeleteOrderHandler(Handler):
         super().__init__()
 
     def run(self):
-        """Call StoreManager to check out from stock"""
-        # TODO: utilisez l'ID de la commande pour la supprimer (vous pouvez utiliser les autres handlers comme réference d'implementation)
+        """Call StoreManager to delete the order using its ID"""
+        # Ce handler n'est déclenché qu'en cas d'erreur (après la restauration du stock).
+        # Il supprime la commande à l'aide de son ID via l'endpoint DELETE /orders de la Gateway.
+        try:
+            requests.delete(f'{config.API_GATEWAY_URL}/store-manager-api/orders/{self.order_id}',
+                headers={'Content-Type': 'application/json'}
+            )
+        except Exception as e:
+            # Pas de rollback sur les rollbacks : on journalise et on poursuit vers l'état terminal.
+            self.logger.error("DeleteOrder a échoué : " + str(e))
+
         self.logger.debug(f"Transition d'état: DeleteOrder -> ORDER_DELETED")
         return OrderSagaState.ORDER_DELETED
-        
+
     def rollback(self):
         """
         (rollback not applicable for DeleteOrder)
